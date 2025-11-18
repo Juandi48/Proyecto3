@@ -1,394 +1,779 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Any
-import argparse
+from typing import Dict, List, Tuple
+import os
 
 
 @dataclass
-class Node:
+class Nodo:
     """
-    Nodo de una Red Bayesiana.
-    - name: nombre de la variable (cadena)
-    - values: lista de valores posibles (dominio discreto)
-    - parents: lista de nombres de variables padre
-    - cpt: tabla de probabilidad condicional
-           dict: (valores_padres_en_orden) -> { valor_propio: prob }
+    Representa un nodo en una Red Bayesiana.
+    
+    Atributos:
+        nombre: Identificador único del nodo
+        valores: Lista de valores posibles que puede tomar el nodo
+        padres: Lista de nombres de nodos padres
+        cpt: Tabla de probabilidad condicional (Conditional Probability Table)
+             Formato: {tupla_valores_padres: {valor_nodo: probabilidad}}
     """
-    name: str
-    values: List[str]
-    parents: List[str] = field(default_factory=list)
+    nombre: str
+    valores: List[str]
+    padres: List[str] = field(default_factory=list)
     cpt: Dict[Tuple[str, ...], Dict[str, float]] = field(default_factory=dict)
 
-    def prob(self, value: str, parent_assignment: Dict[str, str]) -> float:
+    def probabilidad(self, valor: str, asignacion_padres: Dict[str, str]) -> float:
         """
-        Retorna P(self=value | padres=parent_assignment).
-        parent_assignment contiene asignaciones para todos los padres.
+        Calcula P(self=valor | padres=asignacion_padres)
+        
+        Args:
+            valor: Valor del nodo actual a consultar
+            asignacion_padres: Diccionario con los valores de todos los padres
+            
+        Returns:
+            Probabilidad condicional solicitada
+            
+        Raises:
+            KeyError: Si no existe la entrada en la CPT para la combinación dada
         """
-        key = tuple(parent_assignment[p] for p in self.parents) if self.parents else ()
+        # Construir la clave para la CPT basada en los valores de los padres
+        clave = tuple(asignacion_padres[p] for p in self.padres) if self.padres else ()
+        
         try:
-            return self.cpt[key][value]
+            return self.cpt[clave][valor]
         except KeyError as e:
             raise KeyError(
-                f"Falta entrada en CPT para nodo {self.name}, "
-                f"padres {self.parents}, asignación {parent_assignment}, valor {value}"
+                f"Falta entrada en CPT para nodo {self.nombre}, "
+                f"padres {self.padres}, asignación {asignacion_padres}, valor {valor}"
             ) from e
 
     def __str__(self) -> str:
-        parent_str = ", ".join(self.parents) if self.parents else "None"
-        return f"Node({self.name}, values={self.values}, parents={parent_str})"
+        """Representación en string del nodo para debugging"""
+        padres_str = ", ".join(self.padres) if self.padres else "Ninguno"
+        return f"Nodo({self.nombre}, valores={self.valores}, padres={padres_str})"
 
 
-class BayesianNetwork:
+class RedBayesiana:
     """
-    Implementación básica de Red Bayesiana + motor de inferencia por enumeración.
+    Implementa una Red Bayesiana con motor de inferencia por enumeración.
+    
+    La red se compone de nodos y relaciones padre-hijo, con tablas de probabilidad
+    condicional para cada nodo.
     """
+    
     def __init__(self):
-        self.nodes: Dict[str, Node] = {}
-        self.children: Dict[str, List[str]] = {}
+        """Inicializa una red bayesiana vacía"""
+        self.nodos: Dict[str, Nodo] = {}
+        self.hijos: Dict[str, List[str]] = {}
 
-    # ================== Manejo de estructura ==================
+    # ================== MANEJO DE ESTRUCTURA ==================
 
-    def add_edge(self, parent: str, child: str):
+    def agregar_arista(self, padre: str, hijo: str):
         """
-        Agregar arista padre -> hijo a la red.
-        Se crean los nodos si no existían.
+        Agrega una relación de dependencia padre -> hijo a la red.
+        
+        Args:
+            padre: Nombre del nodo padre
+            hijo: Nombre del nodo hijo
+            
+        Nota:
+            Si los nodos no existen, se crean automáticamente
         """
-        if parent not in self.nodes:
-            self.nodes[parent] = Node(name=parent, values=[])
-        if child not in self.nodes:
-            self.nodes[child] = Node(name=child, values=[])
+        if padre not in self.nodos:
+            self.nodos[padre] = Nodo(nombre=padre, valores=[])
+        if hijo not in self.nodos:
+            self.nodos[hijo] = Nodo(nombre=hijo, valores=[])
 
-        if child not in self.nodes[child].parents:
-            self.nodes[child].parents.append(parent)
+        # Actualizar lista de padres del hijo
+        if padre not in self.nodos[hijo].padres:
+            self.nodos[hijo].padres.append(padre)
 
-        self.children.setdefault(parent, [])
-        if child not in self.children[parent]:
-            self.children[parent].append(child)
+        # Actualizar lista de hijos del padre
+        self.hijos.setdefault(padre, [])
+        if hijo not in self.hijos[padre]:
+            self.hijos[padre].append(hijo)
 
-    def set_node_info(self, name: str, values: List[str]):
+    def definir_info_nodo(self, nombre: str, valores: List[str]):
         """
-        Definir el dominio (valores posibles) de un nodo.
+        Define el dominio (valores posibles) de un nodo.
+        
+        Args:
+            nombre: Nombre del nodo
+            valores: Lista de valores posibles del nodo
         """
-        if name not in self.nodes:
-            self.nodes[name] = Node(name=name, values=values)
+        if nombre not in self.nodos:
+            self.nodos[nombre] = Nodo(nombre=nombre, valores=valores)
         else:
-            self.nodes[name].values = values
+            self.nodos[nombre].valores = valores
 
-    def set_cpt_entry(self, name: str, parent_values: Tuple[str, ...], value_probs: Dict[str, float]):
+    def definir_entrada_cpt(self, nombre: str, valores_padres: Tuple[str, ...], 
+                           probabilidades_valores: Dict[str, float]):
         """
-        Definir una fila de la CPT para el nodo `name`.
-        parent_values es una tupla con los valores de los padres en orden.
-        value_probs es un dict valor_propio -> prob.
+        Define una fila de la CPT para un nodo.
+        
+        Args:
+            nombre: Nombre del nodo
+            valores_padres: Tupla con valores de los padres en orden
+            probabilidades_valores: Diccionario valor -> probabilidad
+            
+        Raises:
+            ValueError: Si las probabilidades no suman 1
         """
-        node = self.nodes[name]
-        total = sum(value_probs.values())
+        nodo = self.nodos[nombre]
+        total = sum(probabilidades_valores.values())
+        
+        # Validar que las probabilidades sumen 1
         if abs(total - 1.0) > 1e-6:
             raise ValueError(
-                f"CPT para nodo {name} y padres {parent_values} no suma 1 (suma={total})."
+                f"CPT para nodo {nombre} y padres {valores_padres} no suma 1 (suma={total:.6f})."
             )
-        node.cpt[parent_values] = value_probs
+        
+        nodo.cpt[valores_padres] = probabilidades_valores
 
-    def roots(self) -> List[str]:
-        """Retorna la lista de nodos raíz (sin padres)."""
-        return [name for name, node in self.nodes.items() if not node.parents]
+    def raices(self) -> List[str]:
+        """Retorna la lista de nodos raíz (sin padres)"""
+        return [nombre for nombre, nodo in self.nodos.items() if not nodo.padres]
 
-    def topological_order(self) -> List[str]:
+    def orden_topologico(self) -> List[str]:
         """
-        Orden topológico (padres antes que hijos).
-        Implementación de algoritmo de Kahn.
+        Calcula el orden topológico de los nodos (padres antes que hijos).
+        
+        Usa el algoritmo de Kahn para ordenamiento topológico.
+        
+        Returns:
+            Lista de nombres de nodos en orden topológico
+            
+        Raises:
+            ValueError: Si la red tiene ciclos
         """
-        in_degree = {name: len(node.parents) for name, node in self.nodes.items()}
-        queue = [n for n, d in in_degree.items() if d == 0]
-        order: List[str] = []
+        # Calcular grados de entrada
+        grado_entrada = {nombre: len(nodo.padres) for nombre, nodo in self.nodos.items()}
+        cola = [n for n, d in grado_entrada.items() if d == 0]
+        orden: List[str] = []
 
-        while queue:
-            n = queue.pop(0)
-            order.append(n)
-            for child in self.children.get(n, []):
-                in_degree[child] -= 1
-                if in_degree[child] == 0:
-                    queue.append(child)
+        while cola:
+            nodo_actual = cola.pop(0)
+            orden.append(nodo_actual)
+            
+            # Reducir grado de entrada de hijos
+            for hijo in self.hijos.get(nodo_actual, []):
+                grado_entrada[hijo] -= 1
+                if grado_entrada[hijo] == 0:
+                    cola.append(hijo)
 
-        if len(order) != len(self.nodes):
-            raise ValueError("La red tiene un ciclo o algo raro: no se pudo ordenar topológicamente.")
-        return order
+        # Verificar que todos los nodos fueron procesados
+        if len(orden) != len(self.nodos):
+            raise ValueError("La red tiene ciclos - no es un grafo acíclico dirigido.")
+        
+        return orden
 
-    # ================== Impresión / visualización ==================
+    # ================== VALIDACIÓN ==================
 
-    def print_structure(self):
+    def validar_red(self):
         """
-        Imprime en texto la estructura de la red:
-        para cada nodo, sus padres e hijos, recorridos en orden topológico.
+        Valida que la red esté completa y sea consistente.
+        
+        Verifica:
+        - Todos los nodos tienen valores definidos
+        - Las CPTs cubren todas las combinaciones de padres
+        - Las probabilidades en cada fila de CPT suman 1
+        
+        Raises:
+            ValueError: Si se encuentra algún problema en la red
         """
-        print("=== Estructura de la Red Bayesiana ===")
-        roots = self.roots()
-        print(f"Nodos raíz: {', '.join(roots) if roots else 'Ninguno'}")
-        for name in self.topological_order():
-            node = self.nodes[name]
-            parents = ", ".join(node.parents) if node.parents else "None"
-            childs = ", ".join(self.children.get(name, [])) if self.children.get(name) else "None"
-            print(f"- {name}")
-            print(f"    Padres: {parents}")
-            print(f"    Hijos : {childs}")
-        print("=== Fin de estructura ===\n")
-
-    def print_cpts(self):
-        """
-        Imprime en texto las tablas de probabilidad condicional (CPT).
-        """
-        print("=== Tablas de Probabilidad Condicional (CPT) ===")
-        for name in self.topological_order():
-            node = self.nodes[name]
-            print(f"Nodo: {name}")
-            print(f"Valores: {', '.join(node.values)}")
-            if not node.parents:
-                dist = node.cpt.get((), {})
-                for val in node.values:
-                    print(f"  P({name}={val}) = {dist.get(val, 'N/A')}")
+        for nombre, nodo in self.nodos.items():
+            # Verificar que el nodo tenga valores definidos
+            if not nodo.valores:
+                raise ValueError(f"El nodo {nombre} no tiene valores definidos")
+            
+            # Para nodos con padres, verificar todas las combinaciones
+            if nodo.padres:
+                # Generar todas las combinaciones posibles de valores de padres
+                combinaciones_padres = [[]]
+                
+                for padre_nombre in nodo.padres:
+                    padre = self.nodos[padre_nombre]
+                    nuevas_combinaciones = []
+                    
+                    for comb in combinaciones_padres:
+                        for valor in padre.valores:
+                            nuevas_combinaciones.append(comb + [valor])
+                    combinaciones_padres = nuevas_combinaciones
+                
+                # Verificar que cada combinación tenga entrada en CPT
+                for comb in combinaciones_padres:
+                    clave = tuple(comb)
+                    if clave not in nodo.cpt:
+                        raise ValueError(
+                            f"Falta entrada CPT para nodo {nombre} con padres {clave}"
+                        )
             else:
-                print(f"Padres: {', '.join(node.parents)}")
-                header = "  " + "  ".join(node.parents) + "  |  " + "  ".join(node.values)
-                print(header)
-                for parent_assign, dist in node.cpt.items():
-                    parent_vals_str = "  ".join(parent_assign)
-                    probs_str = "  ".join(f"{dist.get(v, 'N/A')}" for v in node.values)
-                    print(f"  {parent_vals_str}  |  {probs_str}")
-            print()
-        print("=== Fin de tablas CPT ===\n")
+                # Nodo sin padres debe tener al menos una entrada CPT
+                if () not in nodo.cpt:
+                    raise ValueError(f"Falta CPT para nodo raíz {nombre}")
+            
+            # Verificar que cada entrada CPT tenga probabilidades válidas
+            for valores_padres, distribucion in nodo.cpt.items():
+                total = sum(distribucion.values())
+                if abs(total - 1.0) > 1e-6:
+                    raise ValueError(
+                        f"CPT para nodo {nombre} con padres {valores_padres} "
+                        f"no suma 1 (suma={total:.6f})"
+                    )
 
-    # ================== Carga desde archivos ==================
+    # ================== VISUALIZACIÓN ==================
+
+    def imprimir_estructura(self):
+        """Imprime la estructura de la red de forma organizada"""
+        print("\n" + "=" * 50)
+        print("ESTRUCTURA DE LA RED BAYESIANA")
+        print("=" * 50)
+        
+        raices = self.raices()
+        print(f"Nodos raíz: {', '.join(raices) if raices else 'Ninguno'}")
+        print()
+        
+        for nombre in self.orden_topologico():
+            nodo = self.nodos[nombre]
+            padres = ", ".join(nodo.padres) if nodo.padres else "Ninguno"
+            hijos = ", ".join(self.hijos.get(nombre, [])) if self.hijos.get(nombre) else "Ninguno"
+            
+            print(f"NODO: {nombre}")
+            print(f"  Padres: {padres}")
+            print(f"  Hijos:  {hijos}")
+            print(f"  Valores: {', '.join(nodo.valores)}")
+            print()
+        
+        print("=" * 50)
+
+    def imprimir_cpts(self):
+        """Imprime las tablas de probabilidad condicional de forma organizada"""
+        print("\n" + "=" * 50)
+        print("TABLAS DE PROBABILIDAD CONDICIONAL (CPT)")
+        print("=" * 50)
+        
+        for nombre in self.orden_topologico():
+            nodo = self.nodos[nombre]
+            print(f"\n--- Nodo: {nombre} ---")
+            print(f"Valores: {', '.join(nodo.valores)}")
+            
+            if not nodo.padres:
+                # Nodo sin padres
+                distribucion = nodo.cpt.get((), {})
+                print("Probabilidades:")
+                for valor in nodo.valores:
+                    prob = distribucion.get(valor, 0.0)
+                    print(f"  P({nombre}={valor}) = {prob:.4f}")
+            else:
+                # Nodo con padres
+                print(f"Padres: {', '.join(nodo.padres)}")
+                print()
+                
+                # Encabezado de la tabla
+                header_padres = " | ".join(nodo.padres)
+                header_valores = " | ".join(nodo.valores)
+                print(f"{header_padres} || {header_valores}")
+                print("-" * (len(header_padres) + len(header_valores) + 4))
+                
+                # Filas de la tabla
+                for asignacion_padres, distribucion in nodo.cpt.items():
+                    str_padres = " | ".join(asignacion_padres)
+                    str_valores = " | ".join(f"{distribucion.get(v, 0.0):.4f}" for v in nodo.valores)
+                    print(f"{str_padres} || {str_valores}")
+        
+        print("\n" + "=" * 50)
+
+    # ================== CARGA DESDE ARCHIVOS ==================
 
     @classmethod
-    def from_files(cls, structure_path: str, cpt_path: str) -> "BayesianNetwork":
+    def desde_archivos(cls, ruta_estructura: str, ruta_cpt: str) -> "RedBayesiana":
         """
-        Carga la red desde dos archivos de texto:
-        - structure_path: cada línea 'Padre -> Hijo'
-        - cpt_path: formato por nodos (ver abajo).
+        Crea una red bayesiana desde archivos de texto.
+        
+        Args:
+            ruta_estructura: Ruta al archivo con la estructura de la red
+            ruta_cpt: Ruta al archivo con las tablas de probabilidad
+            
+        Returns:
+            RedBayesiana cargada y validada
         """
-        bn = cls()
+        red = cls()
 
-        # ----- Estructura -----
-        with open(structure_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
+        # ----- CARGAR ESTRUCTURA -----
+        print(f"\nCargando estructura desde: {ruta_estructura}")
+        with open(ruta_estructura, "r", encoding="utf-8") as archivo:
+            for num_linea, linea in enumerate(archivo, 1):
+                linea = linea.strip()
+                
+                # Saltar líneas vacías o comentarios
+                if not linea or linea.startswith("#"):
                     continue
-                if "->" not in line:
+                    
+                if "->" not in linea:
                     raise ValueError(
-                        f"Línea de estructura inválida (se esperaba 'Padre -> Hijo'): {line}"
+                        f"Línea {num_linea} inválida: '{linea}'. "
+                        f"Formato esperado: 'Padre -> Hijo'"
                     )
-                parent_str, child_str = line.split("->")
-                parent = parent_str.strip()
-                child = child_str.strip()
-                bn.add_edge(parent, child)
+                
+                # Procesar relación padre -> hijo
+                padre_str, hijo_str = linea.split("->")
+                padre = padre_str.strip()
+                hijo = hijo_str.strip()
+                red.agregar_arista(padre, hijo)
 
-        # ----- CPTs -----
-        with open(cpt_path, "r", encoding="utf-8") as f:
-            content = [
-                line.strip()
-                for line in f
-                if line.strip() and not line.strip().startswith("#")
+        # ----- CARGAR TABLAS DE PROBABILIDAD -----
+        print(f"Cargando CPTs desde: {ruta_cpt}")
+        with open(ruta_cpt, "r", encoding="utf-8") as archivo:
+            lineas = [
+                linea.strip()
+                for linea in archivo
+                if linea.strip() and not linea.strip().startswith("#")
             ]
 
-        i = 0
-        while i < len(content):
-            line = content[i]
-            if not line.startswith("NODE"):
-                raise ValueError(f"Se esperaba 'NODE <Nombre>' y se encontró: {line}")
-            _, node_name = line.split(None, 1)
-            i += 1
+        indice = 0
+        while indice < len(lineas):
+            linea = lineas[indice]
+            
+            # Inicio de definición de nodo
+            if not linea.startswith("NODE"):
+                raise ValueError(f"Se esperaba 'NODE <Nombre>', se encontró: {linea}")
+            
+            _, nombre_nodo = linea.split(None, 1)
+            indice += 1
 
-            # VALUES
-            parts = content[i].split()
-            if parts[0] != "VALUES":
+            # Leer valores del nodo
+            partes = lineas[indice].split()
+            if partes[0] != "VALUES":
                 raise ValueError(
-                    f"Se esperaba 'VALUES' después de NODE {node_name}, "
-                    f"se encontró: {content[i]}"
+                    f"Se esperaba 'VALUES' después de NODE {nombre_nodo}, "
+                    f"se encontró: {lineas[indice]}"
                 )
-            values = parts[1:]
-            bn.set_node_info(node_name, values)
-            i += 1
+            valores = partes[1:]
+            red.definir_info_nodo(nombre_nodo, valores)
+            indice += 1
 
-            # PARENTS (opcional)
-            parents: List[str] = []
-            if i < len(content) and content[i].startswith("PARENTS"):
-                parents = content[i].split()[1:]
-                # Ajustar padres en el nodo y estructura
-                for p in parents:
-                    if p not in bn.nodes:
-                        bn.nodes[p] = Node(name=p, values=[])
-                    if node_name not in bn.nodes:
-                        bn.nodes[node_name] = Node(name=node_name, values=values)
-                    if p not in bn.nodes[node_name].parents:
-                        bn.nodes[node_name].parents.append(p)
-                    bn.children.setdefault(p, [])
-                    if node_name not in bn.children[p]:
-                        bn.children[p].append(node_name)
-                i += 1
+            # Leer padres (opcional)
+            padres: List[str] = []
+            if indice < len(lineas) and lineas[indice].startswith("PARENTS"):
+                padres = lineas[indice].split()[1:]
+                
+                # Actualizar relaciones padre-hijo
+                for padre in padres:
+                    if padre not in red.nodos:
+                        red.nodos[padre] = Nodo(nombre=padre, valores=[])
+                    if nombre_nodo not in red.nodos:
+                        red.nodos[nombre_nodo] = Nodo(nombre=nombre_nodo, valores=valores)
+                    
+                    if padre not in red.nodos[nombre_nodo].padres:
+                        red.nodos[nombre_nodo].padres.append(padre)
+                    
+                    red.hijos.setdefault(padre, [])
+                    if nombre_nodo not in red.hijos[padre]:
+                        red.hijos[padre].append(nombre_nodo)
+                
+                indice += 1
 
-            # TABLE
-            if i >= len(content) or content[i] != "TABLE":
+            # Leer tabla de probabilidades
+            if indice >= len(lineas) or lineas[indice] != "TABLE":
                 raise ValueError(
-                    f"Se esperaba 'TABLE' para NODE {node_name}, "
-                    f"se encontró: {content[i] if i < len(content) else 'EOF'}"
+                    f"Se esperaba 'TABLE' para NODE {nombre_nodo}, "
+                    f"se encontró: {lineas[indice] if indice < len(lineas) else 'EOF'}"
                 )
-            i += 1
+            indice += 1
 
-            # Filas de la tabla hasta ENDNODE
-            while i < len(content) and content[i] != "ENDNODE":
-                row = content[i].split()
-                if parents:
-                    # formato: <padres...> <p(valor1)> <p(valor2)> ...
-                    if len(row) != len(parents) + len(values):
+            # Procesar filas de la tabla
+            while indice < len(lineas) and lineas[indice] != "ENDNODE":
+                fila = lineas[indice].split()
+                
+                if padres:
+                    # Nodo con padres: formato <valores_padres> <probabilidades>
+                    if len(fila) != len(padres) + len(valores):
                         raise ValueError(
-                            f"Línea de tabla mal formateada para nodo {node_name}: {content[i]}"
+                            f"Línea de tabla mal formateada para nodo {nombre_nodo}: {lineas[indice]}"
                         )
-                    parent_vals = tuple(row[:len(parents)])
-                    prob_vals = row[len(parents):]
+                    valores_padres = tuple(fila[:len(padres)])
+                    probabilidades = fila[len(padres):]
                 else:
-                    # sin padres: solo las probabilidades
-                    if len(row) != len(values):
+                    # Nodo sin padres: solo probabilidades
+                    if len(fila) != len(valores):
                         raise ValueError(
-                            f"Línea de tabla mal formateada para nodo {node_name} sin padres: {content[i]}"
+                            f"Línea de tabla mal formateada para nodo {nombre_nodo} sin padres: {lineas[indice]}"
                         )
-                    parent_vals = ()
-                    prob_vals = row
+                    valores_padres = ()
+                    probabilidades = fila
 
-                value_probs = {val: float(p) for val, p in zip(values, prob_vals)}
-                bn.set_cpt_entry(node_name, parent_vals, value_probs)
-                i += 1
+                # Crear diccionario de probabilidades
+                dist_probabilidades = {val: float(prob) for val, prob in zip(valores, probabilidades)}
+                red.definir_entrada_cpt(nombre_nodo, valores_padres, dist_probabilidades)
+                indice += 1
 
-            if i >= len(content) or content[i] != "ENDNODE":
-                raise ValueError(f"Se esperaba 'ENDNODE' para NODE {node_name}")
-            i += 1
+            if indice >= len(lineas) or lineas[indice] != "ENDNODE":
+                raise ValueError(f"Se esperaba 'ENDNODE' para NODE {nombre_nodo}")
+            indice += 1
 
-        return bn
+        # Validar la red completa
+        print("Validando estructura y probabilidades...")
+        red.validar_red()
+        print("Red cargada y validada exitosamente!")
+        
+        return red
 
-    # ================== Inferencia por enumeración ==================
+    # ================== INFERENCIA POR ENUMERACIÓN ==================
 
-    def enumeration_ask(self, query_var: str, evidence: Dict[str, str], verbose: bool = False) -> Dict[str, float]:
+    def inferencia_por_enumeracion(self, variable_consulta: str, condiciones_observadas: Dict[str, str], 
+                                 verbose: bool = False) -> Dict[str, float]:
         """
-        Implementa el algoritmo de inferencia por enumeración (Russell & Norvig).
-        Retorna la distribución P(query_var | evidence).
+        Realiza inferencia por enumeración (algoritmo de Russell & Norvig).
+        
+        Args:
+            variable_consulta: Variable para la cual calcular P(X|condiciones)
+            condiciones_observadas: Diccionario con variables observadas y sus valores
+            verbose: Si True, muestra traza detallada del cálculo
+            
+        Returns:
+            Distribución de probabilidad P(X|condiciones)
         """
-        if query_var not in self.nodes:
-            raise KeyError(f"Variable de consulta '{query_var}' no existe en la red.")
+        if variable_consulta not in self.nodos:
+            raise KeyError(f"Variable de consulta '{variable_consulta}' no existe en la red.")
 
-        vars_order = self.topological_order()
-        node = self.nodes[query_var]
-        dist: Dict[str, float] = {}
-
-        for value in node.values:
-            extended_evidence = dict(evidence)
-            extended_evidence[query_var] = value
-            if verbose:
-                print(f"--- Calculando término para {query_var}={value} dado evidencia {evidence} ---")
-            dist[value] = self._enumerate_all(vars_order, extended_evidence, verbose=verbose, depth=0)
-            if verbose:
-                print(f"Resultado sin normalizar para {query_var}={value}: {dist[value]}\n")
-
-        # Normalizar
-        total = sum(dist.values())
-        if total == 0:
-            raise ValueError("La probabilidad total es 0; revise la red o la evidencia.")
-        for v in dist:
-            dist[v] /= total
+        orden_variables = self.orden_topologico()
+        nodo_consulta = self.nodos[variable_consulta]
+        distribucion: Dict[str, float] = {}
 
         if verbose:
-            print(f"Distribución normalizada para {query_var} dado {evidence}: {dist}\n")
+            print("\n" + "=" * 60)
+            print(f"INICIANDO INFERENCIA PARA: {variable_consulta}")
+            print(f"CONDICIONES OBSERVADAS: {self._formatear_condiciones(condiciones_observadas)}")
+            print("=" * 60)
 
-        return dist
+        # Calcular probabilidad para cada valor posible de la variable consulta
+        for valor in nodo_consulta.valores:
+            condiciones_extendidas = dict(condiciones_observadas)
+            condiciones_extendidas[variable_consulta] = valor
+            
+            if verbose:
+                print(f"\n--- Calculando P({variable_consulta}={valor} | {self._formatear_condiciones(condiciones_observadas)}) ---")
+            
+            probabilidad = self._enumerar_todas(orden_variables, condiciones_extendidas, verbose, 0)
+            distribucion[valor] = probabilidad
+            
+            if verbose:
+                print(f"Resultado sin normalizar: {probabilidad:.6f}")
 
-    def _enumerate_all(self, vars_order: List[str], evidence: Dict[str, str], verbose: bool, depth: int) -> float:
+        # Normalizar la distribución
+        total = sum(distribucion.values())
+        if total == 0:
+            raise ValueError(
+                "La probabilidad total es 0. "
+                "Revise la red o las condiciones (pueden ser inconsistentes)."
+            )
+        
+        for valor in distribucion:
+            distribucion[valor] /= total
+
+        return distribucion
+
+    def _enumerar_todas(self, variables: List[str], condiciones: Dict[str, str], 
+                       verbose: bool, profundidad: int) -> float:
         """
-        Parte recursiva del algoritmo de enumeración.
+        Función recursiva auxiliar para el algoritmo de enumeración.
+        
+        Args:
+            variables: Lista de variables pendientes por procesar (orden topológico)
+            condiciones: Asignación actual de valores a variables
+            verbose: Si True, muestra traza detallada
+            profundidad: Nivel de recursión actual (para indentación)
+            
+        Returns:
+            Probabilidad conjunta de las condiciones actuales
         """
-        if not vars_order:
+        # Caso base: no hay más variables
+        if not variables:
             return 1.0
 
-        Y = vars_order[0]
-        nodeY = self.nodes[Y]
-        rest = vars_order[1:]
-        indent = "  " * depth
+        # Tomar primera variable
+        variable_actual = variables[0]
+        nodo_actual = self.nodos[variable_actual]
+        variables_restantes = variables[1:]
+        indentacion = "  " * profundidad
 
-        # Asignación de padres para Y a partir de la evidencia
-        parent_assignment = {p: evidence[p] for p in nodeY.parents if p in evidence}
+        # Obtener valores de los padres desde las condiciones
+        asignacion_padres = {p: condiciones[p] for p in nodo_actual.padres if p in condiciones}
 
-        if Y in evidence:
-            probY = nodeY.prob(evidence[Y], parent_assignment)
+        if variable_actual in condiciones:
+            # Variable en condiciones observadas: usar su valor fijo
+            probabilidad = nodo_actual.probabilidad(condiciones[variable_actual], asignacion_padres)
+            
             if verbose:
-                print(f"{indent}Y={Y} está en la evidencia como {evidence[Y]}, P={probY}")
-            return probY * self._enumerate_all(rest, evidence, verbose, depth + 1)
+                print(f"{indentacion}{variable_actual} observada = {condiciones[variable_actual]}")
+                print(f"{indentacion}P({variable_actual}={condiciones[variable_actual]} | padres) = {probabilidad:.6f}")
+            
+            return probabilidad * self._enumerar_todas(variables_restantes, condiciones, verbose, profundidad + 1)
         else:
+            # Variable no observada: sumar sobre todos sus valores posibles
             total = 0.0
+            
             if verbose:
-                print(f"{indent}Y={Y} no está en la evidencia, sumando sobre sus valores...")
-            for y_val in nodeY.values:
-                probY = nodeY.prob(y_val, parent_assignment)
+                print(f"{indentacion}{variable_actual} no observada, sumando sobre: {nodo_actual.valores}")
+            
+            for valor_posible in nodo_actual.valores:
+                probabilidad = nodo_actual.probabilidad(valor_posible, asignacion_padres)
+                condiciones_extendidas = dict(condiciones)
+                condiciones_extendidas[variable_actual] = valor_posible
+                
                 if verbose:
-                    print(f"{indent}  Asignando {Y}={y_val}, P={probY}")
-                evidence_extended = dict(evidence)
-                evidence_extended[Y] = y_val
-                subtotal = probY * self._enumerate_all(rest, evidence_extended, verbose, depth + 1)
-                if verbose:
-                    print(f"{indent}  Subtotal para {Y}={y_val}: {subtotal}")
+                    print(f"{indentacion}  Probando {variable_actual}={valor_posible}, P = {probabilidad:.6f}")
+                
+                # Llamada recursiva
+                subtotal = probabilidad * self._enumerar_todas(variables_restantes, condiciones_extendidas, verbose, profundidad + 1)
                 total += subtotal
+                
+                if verbose:
+                    print(f"{indentacion}  Subtotal para {variable_actual}={valor_posible}: {subtotal:.6f}")
+            
             if verbose:
-                print(f"{indent}Total para Y={Y}: {total}")
+                print(f"{indentacion}Total para {variable_actual}: {total:.6f}")
+            
             return total
+
+    def _formatear_condiciones(self, condiciones: Dict[str, str]) -> str:
+        """
+        Formatea las condiciones observadas para mostrarlas de manera legible.
+        
+        Args:
+            condiciones: Diccionario de condiciones
+            
+        Returns:
+            String formateado con las condiciones
+        """
+        if not condiciones:
+            return "sin condiciones observadas"
+        return ", ".join(f"{var}={valor}" for var, valor in condiciones.items())
+
+
+def mostrar_menu():
+    """Muestra el menú principal de la aplicación"""
+    print("\n" + "=" * 60)
+    print("MOTOR DE INFERENCIA POR ENUMERACIÓN - REDES BAYESIANAS")
+    print("=" * 60)
+    print("1. Cargar red bayesiana desde archivos")
+    print("2. Mostrar estructura de la red")
+    print("3. Mostrar tablas de probabilidad (CPT)")
+    print("4. Realizar consulta de inferencia")
+    print("5. Salir")
+    print("-" * 60)
+
+
+def obtener_archivos():
+    """Solicita al usuario los archivos de estructura y CPT"""
+    print("\n--- CARGA DE RED BAYESIANA ---")
+    
+    while True:
+        archivo_estructura = input("Ingrese la ruta del archivo de estructura (ej: estructura_red.txt): ").strip()
+        if not archivo_estructura:
+            print("Debe ingresar un archivo de estructura.")
+            continue
+            
+        if not os.path.exists(archivo_estructura):
+            print(f"El archivo '{archivo_estructura}' no existe. Intente nuevamente.")
+            continue
+        break
+    
+    while True:
+        archivo_cpt = input("Ingrese la ruta del archivo de CPT (ej: cpts_red.txt): ").strip()
+        if not archivo_cpt:
+            print("Debe ingresar un archivo de CPT.")
+            continue
+            
+        if not os.path.exists(archivo_cpt):
+            print(f"El archivo '{archivo_cpt}' no existe. Intente nuevamente.")
+            continue
+        break
+    
+    return archivo_estructura, archivo_cpt
+
+
+def seleccionar_condiciones_interactivo(red, consulta_actual):
+    """
+    Permite al usuario seleccionar condiciones de forma interactiva.
+    
+    Args:
+        red: La red bayesiana
+        consulta_actual: Variable que se está consultando
+        
+    Returns:
+        Diccionario con las condiciones seleccionadas
+    """
+    condiciones = {}
+    nodos_disponibles = [n for n in red.orden_topologico() if n != consulta_actual]
+    
+    if not nodos_disponibles:
+        print("No hay nodos disponibles para establecer condiciones.")
+        return condiciones
+    
+    print(f"\n--- ESTABLECER CONDICIONES PARA P({consulta_actual} | condiciones) ---")
+    print("Seleccione las variables que desea establecer como condiciones:")
+    
+    while True:
+        # Mostrar nodos disponibles
+        print("\nVariables disponibles para establecer condiciones:")
+        for i, nombre in enumerate(nodos_disponibles, 1):
+            nodo = red.nodos[nombre]
+            print(f"  {i}. {nombre} ({', '.join(nodo.valores)})")
+        print("  0. Terminar de establecer condiciones")
+        
+        try:
+            seleccion = input("\nSeleccione una variable (número) o 0 para terminar: ").strip()
+            if not seleccion:
+                continue
+                
+            opcion = int(seleccion)
+            if opcion == 0:
+                break
+                
+            if opcion < 1 or opcion > len(nodos_disponibles):
+                print(f"Selección inválida. Elija un número entre 1 y {len(nodos_disponibles)}.")
+                continue
+                
+            variable_seleccionada = nodos_disponibles[opcion - 1]
+            nodo = red.nodos[variable_seleccionada]
+            
+            # Seleccionar valor para la variable
+            print(f"\nSeleccione el valor para {variable_seleccionada}:")
+            for i, valor in enumerate(nodo.valores, 1):
+                print(f"  {i}. {valor}")
+                
+            while True:
+                try:
+                    seleccion_valor = input(f"Seleccione el valor para {variable_seleccionada} (1-{len(nodo.valores)}): ").strip()
+                    if not seleccion_valor:
+                        continue
+                        
+                    opcion_valor = int(seleccion_valor)
+                    if opcion_valor < 1 or opcion_valor > len(nodo.valores):
+                        print(f"Selección inválida. Elija un número entre 1 y {len(nodo.valores)}.")
+                        continue
+                        
+                    valor_seleccionado = nodo.valores[opcion_valor - 1]
+                    condiciones[variable_seleccionada] = valor_seleccionado
+                    print(f"Condición establecida: {variable_seleccionada} = {valor_seleccionado}")
+                    
+                    # Remover la variable de las disponibles
+                    nodos_disponibles.remove(variable_seleccionada)
+                    break
+                    
+                except ValueError:
+                    print("Por favor ingrese un número válido.")
+                    
+        except ValueError:
+            print("Por favor ingrese un número válido.")
+            
+    return condiciones
+
+
+def realizar_consulta(red):
+    """Realiza una consulta de inferencia interactiva"""
+    if not red.nodos:
+        print("Primero debe cargar una red bayesiana (opción 1).")
+        return
+    
+    print("\n--- REALIZAR CONSULTA DE INFERENCIA ---")
+    
+    # Mostrar nodos disponibles
+    print("Nodos disponibles en la red:")
+    for i, nombre in enumerate(red.orden_topologico(), 1):
+        nodo = red.nodos[nombre]
+        print(f"  {i}. {nombre} ({', '.join(nodo.valores)})")
+    
+    # Seleccionar variable de consulta
+    while True:
+        consulta = input("\nIngrese el nombre del nodo a consultar: ").strip()
+        if consulta in red.nodos:
+            break
+        print(f"El nodo '{consulta}' no existe en la red. Intente nuevamente.")
+    
+    # Establecer condiciones de forma interactiva
+    condiciones = seleccionar_condiciones_interactivo(red, consulta)
+    
+    # Preguntar por modo verbose
+    print(f"\n¿Mostrar traza detallada del cálculo de P({consulta} | condiciones)?")
+    verbose = input("(s/n, presione Enter para 'no'): ").strip().lower() == 's'
+    
+    try:
+        # Realizar inferencia
+        print(f"\nCalculando P({consulta} | {red._formatear_condiciones(condiciones)})...")
+        
+        distribucion = red.inferencia_por_enumeracion(consulta, condiciones, verbose=verbose)
+        
+        # Mostrar resultados
+        print("\n" + "=" * 60)
+        print("RESULTADO DE LA INFERENCIA")
+        print("=" * 60)
+        print(f"Distribución de probabilidad para {consulta} dado:")
+        print(f"  Condiciones: {red._formatear_condiciones(condiciones)}")
+        print("-" * 60)
+        
+        for valor, probabilidad in distribucion.items():
+            print(f"  P({consulta}={valor} | condiciones) = {probabilidad:.6f}")
+        
+        # Mostrar el valor más probable
+        valor_max = max(distribucion, key=distribucion.get)
+        prob_max = distribucion[valor_max]
+        print("-" * 60)
+        print(f"Valor más probable: {consulta}={valor_max} con probabilidad {prob_max:.6f}")
+        print("=" * 60)
+        
+    except Exception as e:
+        print(f"Error durante la inferencia: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Motor de inferencia por enumeración con Redes Bayesianas."
-    )
-    parser.add_argument(
-        "--estructura", "-s", required=True,
-        help="Ruta al archivo de estructura de la red (líneas 'Padre -> Hijo')."
-    )
-    parser.add_argument(
-        "--cpt", "-c", required=True,
-        help="Ruta al archivo con las tablas de probabilidad (CPT)."
-    )
-    parser.add_argument(
-        "--consulta", "-q", required=False,
-        help="Variable de consulta (nombre de nodo en la red)."
-    )
-    parser.add_argument(
-        "--evidencia", "-e", nargs="*",
-        help="Evidencia en formato Var=valor, por ejemplo Rain=light"
-    )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true",
-        help="Mostrar traza detallada (paso a paso) de la inferencia."
-    )
-    args = parser.parse_args()
-
-    # Cargar la red
-    bn = BayesianNetwork.from_files(args.estructura, args.cpt)
-
-    # Mostrar estructura y CPTs
-    bn.print_structure()
-    bn.print_cpts()
-
-    # Si hay consulta, hacer inferencia
-    if args.consulta:
-        evidence_dict: Dict[str, str] = {}
-        if args.evidencia:
-            for item in args.evidencia:
-                if "=" not in item:
-                    raise ValueError(
-                        f"Formato de evidencia inválido: {item}. Debe ser Var=valor"
-                    )
-                var, val = item.split("=", 1)
-                evidence_dict[var] = val
-        print(f"Realizando inferencia para {args.consulta} dado evidencia {evidence_dict}")
-        dist = bn.enumeration_ask(args.consulta, evidence_dict, verbose=args.verbose)
-        print(f"Distribución de probabilidad de {args.consulta} dado la evidencia:")
-        for val, p in dist.items():
-            print(f"  P({args.consulta}={val} | evidencia) = {p:.5f}")
-    else:
-        print("No se especificó variable de consulta. Solo se cargó y mostró la red y las CPT.")
+    """Función principal del programa con interfaz interactiva"""
+    red = None
+    
+    print("Bienvenido al Motor de Inferencia por Enumeración")
+    print("Este programa permite realizar inferencias probabilísticas usando Redes Bayesianas")
+    
+    while True:
+        mostrar_menu()
+        opcion = input("\nSeleccione una opción (1-5): ").strip()
+        
+        if opcion == "1":
+            try:
+                arch_estructura, arch_cpt = obtener_archivos()
+                red = RedBayesiana.desde_archivos(arch_estructura, arch_cpt)
+                print("\nRed cargada exitosamente!")
+                red.imprimir_estructura()
+                red.imprimir_cpts()
+            except Exception as e:
+                print(f"Error al cargar la red: {e}")
+                red = None
+        
+        elif opcion == "2":
+            if red:
+                red.imprimir_estructura()
+            else:
+                print("Primero debe cargar una red bayesiana (opción 1).")
+        
+        elif opcion == "3":
+            if red:
+                red.imprimir_cpts()
+            else:
+                print("Primero debe cargar una red bayesiana (opción 1).")
+        
+        elif opcion == "4":
+            if red:
+                realizar_consulta(red)
+            else:
+                print("Primero debe cargar una red bayesiana (opción 1).")
+        
+        elif opcion == "5":
+            print("\nGracias por usar el Motor de Inferencia por Enumeración. ¡Hasta pronto!")
+            break
+        
+        else:
+            print("Opción no válida. Por favor, seleccione una opción del 1 al 5.")
+        
+        input("\nPresione Enter para continuar...")
 
 
 if __name__ == "__main__":

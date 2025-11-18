@@ -1,0 +1,13 @@
+# ==========================================
+# ESTRUCTURA DE RED BAYESIANA - EJEMPLO TREN
+# ==========================================
+
+# La lluvia afecta el mantenimiento y el tren
+Rain -> Maintenance
+Rain -> Train
+
+# El mantenimiento afecta el tren
+Maintenance -> Train
+
+# El tren afecta la asistencia a la cita
+Train -> Appointment

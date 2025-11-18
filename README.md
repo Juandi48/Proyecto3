@@ -297,4 +297,3 @@ El proyecto cumple con:
 
 ⸻
 
-Listo, con esto solo pegas el contenido en README.md y queda redondo para entregar y sustentar.
